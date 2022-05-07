@@ -1,0 +1,828 @@
+---
+title: "WDI-WorldBank"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## WDI -World Bank Data
+
+```{r}
+
+wdi_data <- read.csv("~/Downloads/WDI_csv/WDIData.csv")#has all the data we need
+indicator_names <- wdi_data[, c("Indicator.Name","Indicator.Code")]#will need this df to understand the indicator codes
+
+```
+## Select only OECD Countries
+
+```{r}
+
+#features:
+length(unique(wdi_data$Indicator.Name))#1443 different features
+length(unique(wdi_data$Country.Name))#266 different countries
+
+
+OECD_countries <- read.csv("~/Downloads/csvData.csv")
+dim(OECD_countries)# as of 2020 from OECD website (stats.oecd.org)
+new_countries <- c("Costa Rica", "Colombia")#new members added in 2021 (https://www.oecd.org/newsroom/oecd-welcomes-costa-rica-as-its-38th-member.htm#:~:text=The%20OECD's%2038%20members%20are,Norway%2C%20Poland%2C%20Portugal%2C%20Slovak)
+OECD_country_all <- c(OECD_countries$country, new_countries)
+all_OECD_data <- wdi_data[wdi_data$Country.Name %in% OECD_country_all,]
+
+dim(all_OECD_data)
+
+a <- unique(all_OECD_data$Country.Name)
+b <- sort(OECD_country_all)
+
+b[!b%in%a]
+
+wdi_data[wdi_data$Country.Name=="Slovakia",]
+wdi_data[wdi_data$Country.Name=="South Korea",]
+
+#although South Korea and Slovakia are OECD countries the World Bank dataset doesn't have any data for these countries
+```
+
+Select only Years Between 2000 - 2021 to account for technological and world-wide development since there has been many incidents over history and if we include all years we would also have to account for historical effects. This data will only entail the 21st century and OECD countries since this specific group has a higher chance of fitting the algorithm accurately and extracting information logically.
+
+Also I will pivot the data table so that all indicators designated by the World Bank and the years which are going to be features will be explanatory variables in my models. All indicators will be columns and year will also be a column. 
+
+```{r}
+class(names(all_OECD_data))
+delete_cols <- c(as.character(paste0("X", 1960:1999)), "X", "Indicator.Name", "Country.Code")
+OECD_21c_data <- all_OECD_data[,!names(all_OECD_data)%in%delete_cols]
+names(OECD_21c_data)[3:24] <- as.numeric(2000:2021)
+
+library(tidyr)
+new_1 <- pivot_longer(data=OECD_21c_data,  cols = c(as.character(2000:2021)), names_to="Year")
+OECD_21c <- pivot_wider(data=new_1, names_from = Indicator.Code, values_from = value)
+dim(OECD_21c)
+dim(na.omit(OECD_21c))#I can't exclude na values so I will generate artificial data points with knn clustering after splitting into test and train data
+```
+
+Working with Years Data
+
+For this data set I selected the time frame to be the 21st century and I am first going to use the year variable as a feature to evaluate whether years have a certain effect on a country's development since with each new year there are new inventions, policies, technological developments, diseases, etc. 
+After analyzing year's effect as a feature, I will try to fit the best model on to designated world-wide financial crisis years and designated world-wide prosperous years. I will do this analysis to observe whether my algorithm is better at predicting during crisis years or prosperous years which would provide a better understanding of the machine learning process and would enable my audience to use this algorithm for cases that this algorithm proves to be most accurate. 
+
+## Specify Developed and Developing Countries
+
+The data that specifies which OECD countries are developed and developing are from the UN classification document "World Economic Situation and Prospects 2020" (UNITED NATIONS DEPARTMENT FOR ECONOMIC AND SOCIAL AFFAIRS. World economic situation and prospects 2020. UN, 2020.)
+Greece and Turkey are categorized as economies in transition so for this project I am going to assume that it is a developing economy. For this part I am hard coding the explanatory variable of the project. Developing countries=0, developed countries=1
+
+```{r}
+unique(OECD_21c$Country.Name)
+y <- c(1,1,1,1,0,0,0,1,1,1,1,1,1,0,1,1,1,0,0,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0,1,1)
+y_df <- data.frame(y=y, Country.Name=unique(OECD_21c$Country.Name))
+OECD_21c <- merge(y_df, OECD_21c, by="Country.Name",all=T)
+#since the data of developed and developing countries are not proportional and developing countries have less data I will use upsampling before running my models
+```
+
+
+## Data Exploration and Wrangling
+
+```{r}
+set.seed(1000)
+unique(apply(OECD_21c, 2, class))
+OECD_21c[1:10,1:10]
+#it is also important to get rid of all columns that have mostly na values because those metrics wouldn't provide any insight for us and the artificial data generation with knn means wouldn't suffice
+#for this na cleaning part I will delete the columns that have na values more than or equal to half of the total data for each indicator/feature, I am omitting na values more than half but while regenerating this project other researchers can use other numbers such as 3/4 or 1/5 depending on the accuracy they want to get for the knn mean data generation for missing values
+#In this project I want to have less na values so that knn means could impute missing data points better before fitting my models
+
+drop_col <- c()
+keep_col <- c()
+for (i in 1:ncol(OECD_21c)) {
+
+  if (sum(is.na(OECD_21c[, i])) >= (nrow(OECD_21c)*0.5)){
+  drop_col <- c(i, drop_col)
+  }else{
+  keep_col <- c(i, keep_col)
+}
+}
+
+drop_cols_names <- names(OECD_21c)[drop_col]
+
+indicator_names <- indicator_names[!indicator_names$Indicator.Code %in% drop_cols_names,]
+OECD_21c <- OECD_21c[,-drop_col]
+dim(OECD_21c)#I dropped all columns that had na values more than or equal to half the data for each indicator I also dropped them from the indicator name df that provides name and explanation info for each indicator
+
+
+#getting data summary on randomly selected variables:
+library(skimr)
+data_summary_df <- skim_to_wide(sample(OECD_21c,100))
+data_summary_df_names <- unique(indicator_names[indicator_names$Indicator.Code %in% data_summary_df$skim_variable,])
+
+random_variables_summary_final <- merge(data_summary_df_names, data_summary_df, by.x="Indicator.Code", by.y="skim_variable", all=T)
+head(random_variables_summary_final)
+tail(random_variables_summary_final)
+
+#Looking Into Data Types - What are the values?
+table(indicator_names$Indicator.Name)[1:10]#the data are stored as percentages, dollars or scales/indexes
+
+all_data_percentage <- grepl("%", indicator_names$Indicator.Name)
+percentage_cleaned <- unique(indicator_names$Indicator.Name[!all_data_percentage])#finding variables that are not percentage data
+
+perc_and_dollar_cleaned <- percentage_cleaned[!grepl("\\$", percentage_cleaned)]#variables that are not dollar not percentage
+
+#From this data exploration I realized that some data are in LCU which means in local currency, I will use local currency vs US$ rate data to convert all LCU data to US$
+#I will get the exchange rates from the World Bank data in solumn "PA.NUS.FCRF" which is the "Official exchange rate (LCU per US$, period average)" period average is yearly average in this case and I will fill in the missing exchange rate values from OECD yearly exchange rate data and exclude that column since we are going to account for it with all the data we are converting to USD
+
+OECD_21c <- subset(OECD_21c, select = -c(PA.NUS.FCRF) )
+
+exchange_rates_to_US <- read.csv("~/Downloads/DP_LIVE_29042022010707251.csv")
+#OECD (2022), Exchange rates (indicator). doi: 10.1787/037ed317-en (Accessed on 28 April 2022)
+
+get_country_names <- read.csv("~/Downloads/SNA_TABLE1_22042022071317139.csv")
+get_country_names <- unique(get_country_names[,c("LOCATION", "Country")])
+
+country_names_exchange_rates <- merge(exchange_rates_to_US, get_country_names, by="LOCATION")
+country_names_exchange_rates <- country_names_exchange_rates[,c("Country", "TIME", "Value")]
+
+table(country_names_exchange_rates$Country)[table(country_names_exchange_rates$Country)!=22]#2021 rate is missing for Turkey, so I get the 2021 yearly avg from 
+tr_2021_rate <- data.frame(Country="Turkey", TIME=2021, Value=8.8922) 
+
+country_names_exchange_rates <- rbind(country_names_exchange_rates, tr_2021_rate)
+
+#Now I will  multiply all LCU data with the corresponding exchange rates to be able to have all data in US$:
+
+lcu_codes <- indicator_names$Indicator.Code[grepl("LCU", indicator_names$Indicator.Name)]
+
+
+OECD_21c_with_exchange <- merge(OECD_21c, country_names_exchange_rates, by.x=c("Country.Name", "Year"), by.y = c("Country", "TIME"), all.x=T)
+
+
+dim(OECD_21c_with_exchange)
+
+in_dollars <- OECD_21c_with_exchange[,which(names(OECD_21c_with_exchange) %in% lcu_codes)] * OECD_21c_with_exchange$Value 
+
+OECD_21c[,which(names(OECD_21c) %in% lcu_codes)] <- in_dollars
+
+#Now all data is in US$ which enables comparison for the models
+```
+
+## Visualizing Random Data That is Not Collected in Percentage and Dollars
+
+```{r}
+set.seed(1000)
+random_variables <- sample(perc_and_dollar_cleaned, 10)
+
+random_vars_df <- unique(indicator_names[indicator_names$Indicator.Name %in% random_variables,])
+
+quick_visualization_data <- OECD_21c[,c("y", random_vars_df$Indicator.Code)]
+class(quick_visualization_data$FB.ATM.TOTL.P5)
+
+plot(jitter(y)~jitter(FB.ATM.TOTL.P5), data=quick_visualization_data, xlab=random_vars_df$Indicator.Name[1])
+
+plot(jitter(y)~jitter(EN.ATM.CO2E.PC), data=quick_visualization_data, xlab=random_vars_df$Indicator.Name[2])
+
+plot(jitter(y)~jitter(FP.CPI.TOTL), data=quick_visualization_data, xlab=random_vars_df$Indicator.Name[3])
+
+plot(jitter(y)~jitter(NY.EXP.CAPM.KN), data=quick_visualization_data, xlab=random_vars_df$Indicator.Name[4])
+
+plot(jitter(y)~jitter(NY.GDP.DEFL.ZS), data=quick_visualization_data, xlab=random_vars_df$Indicator.Name[5])
+
+plot(jitter(y)~jitter(NY.GDP.FCST.CN), data=quick_visualization_data, xlab=random_vars_df$Indicator.Name[6])
+
+plot(jitter(y)~jitter(NE.CON.PRVT.KN), data=quick_visualization_data, xlab=random_vars_df$Indicator.Name[7])
+
+plot(jitter(y)~jitter(FM.AST.NFRG.CN), data=quick_visualization_data, xlab=random_vars_df$Indicator.Name[8])
+
+plot(jitter(y)~jitter(SH.DTH.IMRT), data=quick_visualization_data, xlab=random_vars_df$Indicator.Name[9])
+
+plot(jitter(y)~jitter(SM.POP.REFG), data=quick_visualization_data, xlab=random_vars_df$Indicator.Name[10])
+
+```
+
+
+## Filling NA Values with PreProcessing 
+
+After separating test and train and I will fill in th NA values and
+use preprocess() from caret package to impute the missing data. I can use three methods for imputation: knn, bag, median. I won't generate dummy variables for scale data because even though the dataset description has noted them as scaled some data points are float variables 
+
+
+```{r}
+library(cluster)
+library(factoextra)
+library(caret)
+
+#Let's find k for knn impute: 
+OECD_21c$Year <- as.numeric(OECD_21c$Year)
+fviz_nbclust(OECD_21c[,c(-1,-2)], clara, method = "silhouette", correct.d=TRUE)+
+  theme_classic() #according to clara clustering 2 is an optimal number for clusters, I used clara because there are many NA values in the dataset
+
+```
+Although k=2 clustering for knn or bag(like random forest but with smaller numbers of trees) imputation are optimal, the data set has a large number of NA values so for pre-processing, I am going to conduct a two sample t-test on the means of total na values in each developed and developing country entry to find out if the na values are randomly distributed amongst the two different groups of countries. If randomly distributed than I would be able to use a median impute method to impute the missing values with the sample medians since the assumption of median impute method relies on the NA values being distributed randomly in the data set in order to avoid biased sampling during my analysis.  
+
+##Two Sample T-Test for Mean Analysis of Random NA distribution
+
+```{r}
+#H0=na values are randomly distributed across developing and developed countries, x_bar1=x_bar2
+#HA=na values are not randomly distributed across developing and developed countries, x_bar1!=x_bar2
+sums <- c()
+for (i in 1:nrow(OECD_21c)){
+sums[i] <- sum(is.na(OECD_21c[i,]))
+}
+
+test_df <- data.frame(na_sums=sums, y=OECD_21c$y)
+t.test(na_sums ~ y, data = test_df)#we do not reject the null hypothesis
+
+```
+
+According to the hypothesis test NA values are randomly distributed as we do not reject the null hypothesis since the p-value is much larger than alpha=0.05. Although the median impute method is not the ideal pre processing strategy, for example knn or bag imputations would be much preferable for reasonable predictions, with my large amount of missing data I have to utilize this convenient and optimal method which I can satisfy its assumptions within my data. In the analysis of this data mining project I will account for the statistical imbalances or misinterpretations this median imputing method could cause. 
+
+```{r}
+preProcess_missingdata_model <- preProcess(OECD_21c, method='medianImpute')
+preProcess_missingdata_model
+```
+
+According to the steps of the process of median imputation above; it ignored 1 variables and imputed data for all variables. I will now use this model to predict the missing values in OECD_21c:
+
+```{r}
+library(RANN)  # required for knnInpute
+
+OECD_21c <- predict(preProcess_missingdata_model, newdata = OECD_21c)
+anyNA(OECD_21c)
+```
+
+## DATA MINING
+
+In this part I will run models and look into veiled patterns within the data. My goal in this data mining project is to determine the most significant indicators that indicate the development level of OECD countries. I will be able to determine the most significant features or indicators by collecting the most frequently identified indicators by the models I train my data on. I will first start with Lasso because it will assign a coefficient value of zero to insignificant indicators and I will be able to identify the number of explanatory/predictor variables necessary for my other models. After receiving the list of significant indicators and the amount of them, I will select the same number of indicators that are most significant in my other models which are logistics regression, pca+logistic regression, NaiveBayes, and RandomForest. In the end I will compare all models with the classification error, precision, recall, and sensitivity metrics of predicted data and choose the best model. After selecting the best model I will run the final model with the most frequently identified significant indicators(which I will get from comparing all my models) and run the model based on only one year which will be 2008(The Great Recession). I am using year first as an explanatory variable to see is the year indicator has a significant effect on the development level prediction, then I will use the data from only the crisis year, 2008, to assess whether my selected best fitting model works better when year and indicators are specified. Specifying year might have a better effect since each year the technology, international relations, and political events differ and affect the OECD countries in similar ways. I am trying to evaluate whether fitting the model per annum would yield better predictions. I think it is also important to determine how the model evaluates data during different periods because when this model is reproduced for country analysis world wide it would be imperative to account for a crisis yar which would have a negative effect on many indicators and a prosperous year which would pump up the economic indicators. These shifts, when year base data is not accounted for, could be misleading on determining a country's level. 
+
+## Separating Train and Test Sets
+
+```{r}
+set.seed(1000)
+#row numbers for the training data
+trainRowNumbers <- createDataPartition(OECD_21c$y, p=0.8, list=FALSE)
+
+#getting the training  dataset
+trainData <- OECD_21c[trainRowNumbers,-1]
+
+#getting test dataset
+testData <- OECD_21c[-trainRowNumbers,-1]
+
+```
+
+
+## Lasso(standardized)
+Sets coeff to absolute zero if not significant so a Lasso model is a good method for feature selection within the model. 
+
+```{r}
+library(glmnet)
+
+set.seed(1000)
+
+lasso.cv1 <- cv.glmnet(data.matrix(trainData[,-1]), trainData$y,
+                      lambda = 10^seq(-5, -0.1, length.out = 10),
+                      alpha=1, standardize=TRUE)
+lasso.cv2 <- cv.glmnet(data.matrix(trainData[,-1]), trainData$y,
+                      lambda = 10^seq(-5, -0.1, length.out = 40),
+                      alpha=1, standardize=TRUE)
+lasso.cv3 <- cv.glmnet(data.matrix(trainData[,-1]), trainData$y,
+                      lambda = 10^seq(-5, -0.1, length.out = 100),
+                      alpha=1, standardize=TRUE)
+
+plot(lasso.cv1)
+abline(v=log(lasso.cv1$lambda.1se))
+
+plot(lasso.cv2)
+abline(v=log(lasso.cv2$lambda.1se))
+
+plot(lasso.cv3)
+abline(v=log(lasso.cv3$lambda.1se))
+
+#best lambdas are in cv3 so we move forward with that model:
+best_lambda <- which(lasso.cv3$lambda == lasso.cv3$lambda.1se)
+best_betas <- lasso.cv3$glmnet.fit$beta[, best_lambda]
+plot(best_betas)
+abline(a=0,b=1)
+
+mean(best_betas==0)
+
+
+lasso_model <- glmnet(data.matrix(trainData[,-1]), trainData$y, alpha = 1, lambda = lasso.cv3$lambda.1se)
+
+lasso_prediction <- predict(lasso_model, s = lasso.cv3$lambda.1se, newx = data.matrix(testData[,-1]), type="response")
+
+
+lasso_test_table <-  table(predicted = round(lasso_prediction), actual = (testData[,1]))
+lasso_test_table
+
+
+lasso_test_table_conf_mat <-  confusionMatrix(lasso_test_table, positive = "1")
+lasso_test_table_conf_mat
+
+lasso_classification <- 1-lasso_test_table_conf_mat$overall["Accuracy"][[1]]
+
+
+lasso_precision <- lasso_test_table[2,2]/(lasso_test_table[2,1]+lasso_test_table[2,2])
+
+
+lasso_recall <- lasso_test_table[2,2]/(lasso_test_table[1,2]+lasso_test_table[2,2])
+
+lasso_sens<- data.frame(lasso_test_table_conf_mat[4])["Sensitivity",]
+
+
+lasso_metrics <- data.frame(model="lasso", classification_error=lasso_classification, precision=lasso_precision, recall=lasso_recall, sensitivity=lasso_sens)
+lasso_metrics
+```
+
+Looks like a good fit model! But when we look at the confusion matrix data detection rate is low which means that measure ability to actually detect the diverse groups is low. Although the four metrics we use to evaluate the efficiency of the model are perfect, low detection rate does indicate that this model might not be the best fitting model. Yet, we can conclude that the top features selected by this model can be the most significant features or indicators on the development level of a country and the number of significant predictor variables selected is the ideal. 
+
+Since the Lasso model is very good at selecting the significant coefficients I will look into all of them and utilize them to compare with the other models' selected indicators/features:
+
+```{r}
+
+best_betas_df <- data.frame(codes_betas=names(best_betas), best_betas)
+
+sorted_best_betas_df <- best_betas_df[order(-best_betas),]
+
+lasso_betas_df <- sorted_best_betas_df[!sorted_best_betas_df$best_betas==0,]
+dim(lasso_betas_df)#there are only 116 significant indicator variables on development level of country
+
+top_codes_lasso <- lasso_betas_df[,1]
+top_codes_lasso[top_codes_lasso=="Year"]#year is significant for Lasso
+
+important_indicators_lasso <- unique(indicator_names[indicator_names$Indicator.Code %in% top_codes_lasso,])[,1]
+
+```
+
+
+## Logistic Regression with All Features(no scaling nor tuning-raw model)
+
+```{r}
+set.seed(100)
+
+log_reg_model <- glm(y~., data=trainData, family=binomial(link="logit"))
+
+log_reg_model_prediction <- predict(log_reg_model, newdata=testData, type="response")
+
+#significant indicators:
+model_summary <- summary(log_reg_model)
+model_summary
+modl_summ_df <- data.frame(model_summary$coefficients)
+sum((modl_summ_df$Pr...z..)<0.05)#in this model 634 of the beta values are significant as thy have a p-value less than alpha=0.05
+sorted_modl_summ_df <- modl_summ_df[order(modl_summ_df$Pr...z..),]
+#I will select top 116 indicators to be able to compare the most significant 116 indicators with the other models and try to come up with a conclusion on what indicators contribute mostly to the development of an economy, I picked 116 because Lasso determined 116 indicators to be significant
+log_reg_top_indicators <- unique(indicator_names[indicator_names$Indicator.Code %in% rownames(sorted_modl_summ_df[1:116,],),])[,1]
+log_reg_top_indicators <- c("Year",log_reg_top_indicators)#year is also significant when model summary is evaluated
+
+#analysis of model:
+log_reg_model_prediction_rounded <- round(log_reg_model_prediction)
+table(log_reg_model_prediction_rounded)
+
+log_reg_test_table <-  table(predicted = log_reg_model_prediction_rounded, actual = testData$y)
+
+log_reg_test_con_mat <-  confusionMatrix(log_reg_test_table, positive = "1")
+log_reg_test_con_mat
+
+
+log_reg_classification_error <- 1-log_reg_test_con_mat$overall["Accuracy"][[1]]
+
+
+
+log_reg_precision <- log_reg_test_table[2,2]/(log_reg_test_table[2,1]+log_reg_test_table[2,2])
+
+
+
+log_reg_recall <- log_reg_test_table[2,2]/(log_reg_test_table[1,2]+log_reg_test_table[2,2])
+
+log_reg_sens <- data.frame(log_reg_test_con_mat[4])["Sensitivity",]
+
+
+log_reg_metrics <- data.frame(model="logistic regression", classification_error=log_reg_classification_error, precision=log_reg_precision, recall=log_reg_recall, sensitivity=log_reg_sens)
+log_reg_metrics
+
+image(cov(sample(trainData, 100)))#it is hard to visualize collinearity among all data so when we sample 100 we can see that there is collinearity in the data and thus we should utilize PCA to overcome this handicap
+
+```
+
+In this model of logistic regression where all features are included the model summary shows us that none of the beta values are significant. This might be because there are too many predictor variables that are collinear or interacting intrinsically with each other. The metrics suggest that the model fits poorly. The model is predicting less accurately and the predictors have less significance compared to previous model which can also be a repercussion of the median imputation method I used. For a better model, we need feature selection so I will use PCA and logistic regression together next to determine the significant features.  
+
+#PCA + Logistic Regression for Feature Selection and Model Fitting(scaled)
+
+I will use PCA to move forward in selecting the most significant features. 
+
+```{r}
+set.seed(1000)
+pca_out <- prcomp(OECD_21c[,-c(1, 2)], center=TRUE, scale=TRUE)
+eigen_val <- pca_out$sdev^2
+plot(cumsum(eigen_val) / sum(eigen_val),
+     ylim=c(0, 1))
+abline(h=.9)
+
+#I pick the k to be 50 because the kink happens at that point and the variability is lower after 50:
+k <- 50
+
+W <- pca_out$x[, 1:k]
+df_w <- data.frame(y=OECD_21c$y, W)
+
+```
+
+
+Separating Train and Test Data for PCA
+
+For test data I will get the 20% of all data and the rest will be train data 
+
+```{r}
+library(caret)
+
+set.seed(1000)
+
+#getting the training  dataset
+trainData_W <- df_w[trainRowNumbers,]
+
+#getting test dataset
+testData_W <- OECD_21c[-trainRowNumbers,]
+
+
+
+```
+
+##PCA+Logistic Regression
+```{r}
+set.seed(1000)
+
+pca_model <- glm(y ~ ., data=trainData_W, family=binomial(link="logit"))
+pca_model_prediction <- predict(pca_out, newdata=testData_W, type="response")
+
+pca_model_prediction_df <- as.data.frame(pca_model_prediction)
+
+#select the first k components
+pca_model_prediction_df_selected <- pca_model_prediction_df[,1:k]
+
+#make prediction on test data
+pca_prediction_final <- predict(pca_model, pca_model_prediction_df_selected, type="response")
+
+glm_summary <- summary(pca_model)$coefficients
+
+glm_sum_df <- data.frame(glm_summary)[-1,]
+
+sorted_glm_sum_df <- glm_sum_df[order(glm_sum_df$Pr...z..),]
+
+top_3_features <- rownames(sorted_glm_sum_df[2:4,])
+top_3_features
+
+R_mat_top_3_features <- pca_out$rotation[,top_3_features]
+head(R_mat_top_3_features)
+plot(R_mat_top_3_features[,1])
+plot(R_mat_top_3_features[,2])
+plot(R_mat_top_3_features[,3])
+#I will take loadings values that are above 0.02 based on the plots I visualized and only get top 2 because the third plot loadings don't provide significant information
+
+pc1_names <- names(which(R_mat_top_3_features[,1]>0.02))
+pc2_names <- names(which(R_mat_top_3_features[,2]>0.02))
+
+pca_codes <- unique(pc1_names, pc2_names)
+length(pca_codes)
+important_indicators_pca <- unique(indicator_names[indicator_names$Indicator.Code %in% pca_codes,])[,1]
+
+
+pca_model_prediction_rounded <- round(pca_prediction_final)
+table(pca_model_prediction_rounded)
+
+pca_test_table <-  table(predicted = pca_model_prediction_rounded, actual = testData$y)
+
+pca_test_con_mat <-  confusionMatrix(pca_test_table, positive = "1")
+pca_test_con_mat
+
+pca_classification_error <- 1-pca_test_con_mat$overall["Accuracy"][[1]]
+
+
+pca_precision <- pca_test_table[2,2]/(pca_test_table[2,1]+pca_test_table[2,2])
+
+pca_recall <- pca_test_table[2,2]/(pca_test_table[1,2]+pca_test_table[2,2])
+
+pca_sens <- data.frame(pca_test_con_mat[4])["Sensitivity",]
+
+pca_log_reg_metrics <- data.frame(model="pca + logistic regression", classification_error=pca_classification_error, precision=pca_precision, recall=pca_recall, sensitivity=pca_sens)
+pca_log_reg_metrics
+```
+
+The PCA + logistic regression can detect a signal between our “W” and Y and it has a lower classification error compared to logistic regression model. The model has selected 232 features to be indicative of development of a country which is more than the number of indicators lasso had selected. The model can’t avoid random noise as we get the necessary features list to be very long. I will try out other algorithms to compare  which is the best fitting. 
+
+
+## NaiveBayes(tuned)
+
+```{r}
+library(e1071)
+library(nnet)
+library(tidyverse)
+library(caret)
+
+set.seed(1000)
+tune.control <- tune.control(random =F, nrepeat=1, repeat.aggregate=min,sampling=c("cross"),sampling.aggregate=mean, cross=10, best.model=T, performances=T)
+
+
+NB_model <- naiveBayes(y ~ ., trainData, tune.control)
+
+NB_model_pred <- predict(NB_model, testData)
+
+
+conf_mat_NB <- table(actual=testData$y, prediction=NB_model_pred)
+conf_mat_NB
+
+conf_mat_NB_results <- confusionMatrix(conf_mat_NB)
+conf_mat_NB_results
+
+NB_classification_error <- 1-conf_mat_NB_results$overall["Accuracy"][[1]]
+
+NB_precision <- conf_mat_NB[2,2]/(conf_mat_NB[2,1]+conf_mat_NB[2,2])
+
+NB_recall <- conf_mat_NB[2,2]/(conf_mat_NB[1,2]+conf_mat_NB[2,2])
+
+NB_sens <- data.frame(conf_mat_NB_results[4])["Sensitivity",]
+
+
+NB_metrics <- data.frame(model="NaiveBayes", classification_error=NB_classification_error, precision=NB_precision, recall=NB_recall, sensitivity=NB_sens)
+NB_metrics
+
+```
+
+## RandomForest(tuned)
+
+```{r}
+set.seed(1000)
+trainData$y <- as.factor(trainData$y)
+levels(trainData$y) <- c("zero", "one")
+
+fitControl <- trainControl(method = 'cv', number = 5, savePredictions = 'final', classProbs = T, summaryFunction=twoClassSummary) 
+
+
+model_rf <- train(y ~ ., data=trainData, method='rf', tuneLength=5, trControl = fitControl)
+model_rf
+
+rf_pred <- predict(model_rf, testData)
+
+conf_mat_rf <- table(actual=testData$y, prediction=ifelse(rf_pred=="one", 1,0))
+conf_mat_rf
+
+conf_mat_rf_results <- confusionMatrix(conf_mat_rf)
+conf_mat_rf_results
+
+rf_classification_error <- 1-conf_mat_rf_results$overall["Accuracy"][[1]]
+
+rf_precision <- conf_mat_rf[2,2]/(conf_mat_rf[2,1]+conf_mat_rf[2,2])
+
+rf_recall <- conf_mat_rf[2,2]/(conf_mat_rf[1,2]+conf_mat_rf[2,2])
+
+rf_sens <- data.frame(conf_mat_rf_results[4])["Sensitivity",]
+
+
+rf_metrics <- data.frame(model="RandomForest", classification_error=rf_classification_error, precision=rf_precision, recall=rf_recall, sensitivity=rf_sens)
+rf_metrics
+```
+## Comparing the Metrics
+
+```{r}
+metrics_comparison_df <- rbind(lasso_metrics, log_reg_metrics, pca_log_reg_metrics, NB_metrics, rf_metrics)
+metrics_comparison_df
+
+theme_set(theme_bw()) 
+gg <- ggplot(metrics_comparison_df, aes(x=recall, y=precision, color=model, group=model)) + 
+  geom_point(aes(size=classification_error)) + 
+  labs(subtitle="Comparing Comparison Metrics of Each Model", 
+       y="Precisions", 
+       x="Recalls", 
+       title="Magnitudes of Comparison Metrics") + geom_vline(aes(group=model, color=model, xintercept = sensitivity)) + geom_text(aes(label=model ,hjust=0,vjust=0))
+
+
+plot(gg)
+```
+In this metrics comparison graph we see that scaled lasso and tuned random forest and naive bayes have the same sensitivity which is 1. So for creating the best fit model with significant indicators from the financial crisis year 2008 I will get the significant indicators determined by the lasso model and fit my model with random forest because lasso has highest recall and random forest has highest precision with less classification error. 
+I will also engineer a new feature utilizing the significant indicators that were selected by all the models and include it in this final model.
+To asses the significance of my engineered feature I will conduct a chi-square test using anova() for it by fitting a logistic regression with the most significant indicators that were in all models. 
+
+## Feature Engineering
+
+```{r}
+set.seed(1000)
+library(corrplot)
+joint_indicators <- important_indicators_lasso[important_indicators_lasso %in% log_reg_top_indicators] 
+
+joint_indicators <- joint_indicators[joint_indicators %in% important_indicators_pca]
+
+joint_indicators#these 19 indicators were selected by all models
+
+joint_ind_codes <- unique(indicator_names[indicator_names$Indicator.Name%in% joint_indicators,])[,2]
+
+joint_features_matrix <- data.matrix(OECD_21c[,joint_ind_codes])
+
+joint_feature_corr_matrix <- cor(joint_features_matrix)
+image(joint_feature_corr_matrix)#there is correlation
+
+corrplot(joint_feature_corr_matrix, method="circle")
+
+cor.mtest = function(mat, ...) {
+  mat = as.matrix(mat)
+  n = ncol(mat)
+  p.mat = lowCI.mat = uppCI.mat = matrix(NA, n, n)
+  diag(p.mat) = 0
+  diag(lowCI.mat) = diag(uppCI.mat) = 1
+  for (i in 1:(n - 1)) {
+    for (j in (i + 1):n) {
+
+      tmp = cor.test(x = mat[, i], y = mat[, j], ...)
+      p.mat[i, j] = p.mat[j, i] = tmp$p.value
+
+      ## only 'pearson' method provides confidence intervals
+      if (!is.null(tmp$conf.int)) {
+        lowCI.mat[i, j] = lowCI.mat[j, i] = tmp$conf.int[1]
+        uppCI.mat[i, j] = uppCI.mat[j, i] = tmp$conf.int[2]
+      }
+    }
+  }
+
+  colnames(p.mat) = rownames(p.mat) = colnames(mat)
+  colnames(lowCI.mat) = rownames(lowCI.mat) = colnames(mat)
+  colnames(uppCI.mat) = rownames(uppCI.mat) = colnames(mat)
+
+  list(
+    p = p.mat,
+    lowCI = lowCI.mat,
+    uppCI = uppCI.mat
+  )
+}
+## matrix of the p-value of the correlation
+significance_test1 <- cor.mtest(joint_feature_corr_matrix)
+
+corrplot(joint_feature_corr_matrix, type="upper", p.mat = significance_test1$p, insig='blank', sig.level = 0.05, order = 'hclust', tl.cex=0.8)
+
+unique(indicator_names[indicator_names$Indicator.Code%in%joint_ind_codes,])
+
+#unique(indicator_names[indicator_names$Indicator.Code%in%c("IS.AIR.PSGR", "IS.AIR.DPRT", "NY.ADJ.NNTY.KD", "NY.ADJ.DCO2.CD", "NY.ADJ.NNTY.KD.ZG", "NY.ADJ.NNTY.PC.KD.ZG","AG.LND.AGRI.K2","EN.ATM.NOXE.AG.KT.CE", "NY.ADJ.AEDU.GN.ZS", "NY.ADJ.DPEM.GN.ZS", "NY.ADJ.DCO2.GN.ZS"),])
+
+
+```
+
+Based on the correlation plot "IS.AIR.PSGR"(Air transport, passengers carried	), "IS.AIR.DPRT"(Air transport, registered carrier departures worldwide	), "NY.ADJ.NNTY.KD"(Adjusted net national income (constant 2015 US)), and "NY.ADJ.DCO2.CD"(Adjusted savings: carbon dioxide damage (current US)) are all highly positively correlated. 
+
+"NY.ADJ.NNTY.KD.ZG"(Adjusted net national income (annual % growth)) is  highly positively correlated with "NY.ADJ.NNTY.PC.KD.ZG". (Adjusted net national income per capita (annual % growth))
+ 
+"AG.LND.AGRI.K2"(Agricultural land (sq. km)	) is  highly positively correlated with "EN.ATM.NOXE.AG.KT.CE"(Agricultural nitrous oxide emissions (thousand metric tons of CO2 equivalent)).
+
+"NY.ADJ.AEDU.GN.ZS"(Adjusted savings: education expenditure (% of GNI)) is negatively significantly correlated with "NY.ADJ.DPEM.GN.ZS"(Adjusted savings: particulate emission damage (% of GNI)	) and "NY.ADJ.DCO2.GN.ZS"(Adjusted savings: carbon dioxide damage (% of GNI)	)
+
+One of the most interesting correlation among the most significant indicators, in my opinion, is the negative correlation betwee education expenditure and cost of carbon dioxide damage. Below are the visualizations:
+
+```{r}
+
+plot(jitter(y)~jitter(NY.ADJ.AEDU.GN.ZS), data=OECD_21c, xlab="Adjusted savings: education expenditure (% of GNI)")
+
+plot(jitter(y)~jitter(NY.ADJ.DCO2.GN.ZS), data=OECD_21c, xlab="Adjusted savings: carbon dioxide damage (% of GNI)")
+```
+
+The graphs indicate that for developed countries the rate of education expenditure is high and cost of carbon dioxide damage is low while it is the opposite in developing countries. The visualizations don't provide explicit data on effect on education and especially female education so I am going to engineer a feature based on female education indicators to account for the effect of education among the most significant indicators. The importance of education is obvious from this analysis and could be represented as another variable. 
+
+```{r}
+
+education_indicators <- rbind(unique(indicator_names[grepl("school",indicator_names$Indicator.Name),]), unique(indicator_names[grepl("education",indicator_names$Indicator.Name),]))
+
+#from the indicators that specify data about female education and schooling I am selecting the ones below:
+education_ind_names <- c("Share of youth not in education, employment or training, female (% of female youth population)", "Primary education, pupils (% female)", "Labor force with advanced education, female (% of female working-age population with advanced education)", "Compulsory education, duration (years)") 
+#I will normalize between 0 and 1 each indicator(except compulsory education years) then I will multiply all indicator data to generate a females education score that will be added to the best fit model I will generate
+
+education_female_cols <- unique(indicator_names[indicator_names$Indicator.Name%in%education_ind_names,])[,2]
+
+col1 <- OECD_21c[,education_female_cols[1]]
+col2 <- (OECD_21c[,education_female_cols[2]] - min(OECD_21c[,education_female_cols[2]])) / (max(OECD_21c[,education_female_cols[2]]) - min(OECD_21c[,education_female_cols[2]]))
+col3 <- (OECD_21c[,education_female_cols[3]] - min(OECD_21c[,education_female_cols[3]])) / (max(OECD_21c[,education_female_cols[3]]) - min(OECD_21c[,education_female_cols[3]]))
+col4 <- (OECD_21c[,education_female_cols[4]] - min(OECD_21c[,education_female_cols[4]])) / (max(OECD_21c[,education_female_cols[4]]) - min(OECD_21c[,education_female_cols[4]]))
+
+female_education_index <- col1*col2*col3*col4
+
+#Now lets test the significance of this index I engineered with anova():
+#H0=the female education index I engineered is not significant--coefficient=0
+#HA=the female education index I engineered is significant--coefficient!=0
+female_education_index_test_df <- cbind(OECD_21c[,c("y",joint_ind_codes)],  female_education_index=female_education_index)
+
+m1 <- glm(y~., data=female_education_index_test_df, family=binomial(link="logit"))
+m0 <- glm(y~.-female_education_index, data=female_education_index_test_df, family=binomial(link="logit"))
+anova(m0,m1,test="Chisq")
+```
+
+Based on the hypothesis test the female education index is significant for the model that was created with the indicators that were selected to be significant by all models in this data mining project. The p-value of the chi-square test of significance is less than alpha=0.05 so we reject the null hypothesis. The female education index captures the accessibility and quality of female education as it entails data on females that are not taking part in any daily activity(an indicator of unfairness towards females), females access to primary education, educated females proportion in the labor force, and compulsory education duration which enables female students to attend school by law. 
+
+## Final Best Fit Model
+
+predictor variables =  female education index and 116 significant features selected by lasso model only for year 2008
+
+
+```{r}
+set.seed(1000)
+trainData$y <- as.factor(trainData$y)
+levels(trainData$y) <- c("zero", "one")
+
+train_final <- cbind(trainData[,c("y", "Year", top_codes_lasso)], female_education_index=female_education_index[trainRowNumbers])
+train_final <- train_final[train_final$Year==2008, -2]
+
+
+test_final <- cbind(testData[,c("y", "Year", top_codes_lasso)], female_education_index=female_education_index[-trainRowNumbers])
+test_final <- test_final[test_final$Year==2008, -2]
+
+model_rf_final <- train(y ~ ., data=train_final, method='rf', tuneLength=5, trControl = fitControl)
+model_rf_final
+
+rf_pred_final <- predict(model_rf_final, test_final)
+
+conf_mat_rf_final <- table(actual=test_final$y, prediction=rf_pred_final)
+colnames(conf_mat_rf_final) <- c(0,1)
+
+conf_mat_rf_results_final <- confusionMatrix(conf_mat_rf_final)
+conf_mat_rf_results_final
+
+rf_classification_error_final <- 1-conf_mat_rf_results_final$overall["Accuracy"][[1]]
+
+rf_precision_final <- conf_mat_rf_final[2,2]/(conf_mat_rf_final[2,1]+conf_mat_rf_final[2,2])
+
+rf_recall_final <- conf_mat_rf_final[2,2]/(conf_mat_rf_final[1,2]+conf_mat_rf_final[2,2])
+
+rf_sens_final <- data.frame(conf_mat_rf_results_final[4])["Sensitivity",]
+
+
+rf_metrics_final <- data.frame(model="RandomForest_best_fit_2008", classification_error=rf_classification_error_final, precision=rf_precision_final, recall=rf_recall_final, sensitivity=rf_sens_final)
+rf_metrics_final
+
+```
+Let's also try RandomForest without year specification since the classification error is high for only year 2008:
+
+```{r}
+set.seed(1000)
+trainData$y <- as.factor(trainData$y)
+levels(trainData$y) <- c("zero", "one")
+
+train_final_all_years <- cbind(trainData[,c("y", top_codes_lasso)], female_education_index=female_education_index[trainRowNumbers])
+
+test_final_all_years <- cbind(testData[,c("y", top_codes_lasso)], female_education_index=female_education_index[-trainRowNumbers])
+
+
+model_rf_final_all_years <- train(y ~ ., data=train_final_all_years, method='rf', tuneLength=5, trControl = fitControl)
+model_rf_final_all_years
+
+rf_pred_final_all_years <- predict(model_rf_final_all_years, test_final_all_years)
+
+conf_mat_rf_final_all_years <- table(actual=test_final_all_years$y, prediction=ifelse(rf_pred_final_all_years=="one", 1,0))
+conf_mat_rf_final_all_years
+
+conf_mat_rf_results_final_all_years <- confusionMatrix(conf_mat_rf_final_all_years)
+conf_mat_rf_results_final_all_years
+
+rf_classification_error_final_all_years <- 1-conf_mat_rf_results_final_all_years$overall["Accuracy"][[1]]
+
+rf_precision_final_all_years <- conf_mat_rf_final_all_years[2,2]/(conf_mat_rf_final_all_years[2,1]+conf_mat_rf_final_all_years[2,2])
+
+rf_recall_final_all_years <- conf_mat_rf_final_all_years[2,2]/(conf_mat_rf_final_all_years[1,2]+conf_mat_rf_final_all_years[2,2])
+
+rf_sens_final_all_years <- data.frame(conf_mat_rf_results_final_all_years[4])["Sensitivity",]
+
+
+rf_metrics_final_all_years <- data.frame(model="RandomForest_best_fit_all_years", classification_error=rf_classification_error_final_all_years, precision=rf_precision_final_all_years, recall=rf_recall_final_all_years, sensitivity=rf_sens_final_all_years)
+rf_metrics_final_all_years
+```
+
+## Comparing RandomForest Methods with Crisis Year vs All Years 
+
+```{r}
+
+rf_metrics_compare_df <- rbind(rf_metrics_final_all_years, rf_metrics_final)
+  
+theme_set(theme_bw()) 
+gg_rf <- ggplot(rf_metrics_compare_df, aes(x=recall, y=precision, color=model, group=model)) + 
+  geom_point(aes(size=classification_error)) + 
+  labs(subtitle="Comparing Comparison Metrics of Each Model", 
+       y="Precisions", 
+       x="Recalls", 
+       title="Magnitudes of Comparison Metrics") + geom_vline(aes(group=model, color=model, xintercept = sensitivity)) + geom_text(aes(label=model ,hjust=0,vjust=0))
+
+
+plot(gg_rf)
+```
+
+I was expecting to get a better fit with specifying a crisis year because I thought the model would be a better fit if it is setup according to a specific year with specific attributes that minimize the unaccounted exogenous variables. In the two RandomForest models I fitted, I realized that the one that has data accounting for all years without a year explanatory variable is a better fitted model. I had initially thought that year had to be a significant variable that accounts for major historical, technological and political events yet after comparing the final models and the previous other models, I realized that year is not significant. Year wasn't selected by all models either since it doesn't come up when I filter all significant indicators from all models to find the overlapping indicators. 
+
+In conclusion, organizations that are interested in calculating indicators that significantly imply or address development levels of countries and the effect of each indicator on future development should focus primarily on the joint_indicators I got from all models which are:
+
+[1] "Adjusted net national income (annual % growth)"                               
+ [2] "Adjusted net national income (constant 2015 US$)"                             
+ [3] "Adjusted net national income per capita (annual % growth)"                    
+ [4] "Adjusted savings: carbon dioxide damage (% of GNI)"                           
+ [5] "Adjusted savings: carbon dioxide damage (current US$)"                        
+ [6] "Adjusted savings: education expenditure (% of GNI)"                           
+ [7] "Adjusted savings: energy depletion (% of GNI)"                                
+ [8] "Adjusted savings: energy depletion (current US$)"                             
+ [9] "Adjusted savings: particulate emission damage (% of GNI)"                     
+[10] "Agricultural land (sq. km)"                                                   
+[11] "Agricultural nitrous oxide emissions (thousand metric tons of CO2 equivalent)"
+[12] "Agricultural raw materials exports (% of merchandise exports)"                
+[13] "Air transport, passengers carried"                                            
+[14] "Air transport, registered carrier departures worldwide"                       
+[15] "Alternative and nuclear energy (% of total energy use)"                       
+[16] "Arable land (hectares per person)"                                            
+[17] "Arable land (hectares)"                                                       
+[18] "Bank capital to assets ratio (%)"                                             
+[19] "Coal rents (% of GDP)"   
+
+This list can be expanded to a total of 117 variables including the feature I generated (female education index) and the significant variables lasso model has detected. 
+For countries that weren't included in this dataset, year or other politic indicators could be significant as these other countries won't be part of a group like OECD. The ideal dataset would be the data set where no missing values exist because in this data mining project I had to impute data which might have affected the overall performance of all models. We should also consider the positive effect the median imputation method could have caused because the metrics of the models I used were close to each other but with real data the metrics data could have been more diverse. 
